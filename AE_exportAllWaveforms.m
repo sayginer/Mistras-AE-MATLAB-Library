@@ -45,7 +45,9 @@ function AE_exportAllWaveforms(DTAfile, MATfile, varargin)
 %   Part of the Mistras AEwin DTA/WFS MATLAB Reader Library.
 
 % ---- Build the waveform catalog (one pass over the .DTA) ----------------
-W = AE_listWaveforms(DTAfile);
+D = AE_readDTA(DTAfile);          % parse once, reuse for every waveform
+W = AE_listWaveforms(D);
+D.catalog = W;                    % lets AE_plotWaveformByIndex skip re-pairing
 N = height(W);
 fprintf('AE_exportAllWaveforms: found %d waveforms in %s\n', N, DTAfile);
 
@@ -57,7 +59,7 @@ info_cell = cell(N, 1);
 % ---- Decode each waveform (plotMode = 0 → no figure) --------------------
 for k = 1:N
     [t_cell{k}, y_cell{k}, info_cell{k}] = ...
-        AE_plotWaveformByIndex(DTAfile, k, 0, varargin{:});
+        AE_plotWaveformByIndex(D, k, 0, varargin{:});
 end
 
 % ---- Save to .mat (v7.3 = HDF5, supports large arrays) ------------------

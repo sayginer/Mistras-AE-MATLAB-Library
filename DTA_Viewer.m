@@ -6,7 +6,7 @@
 % Adjust 'FileName' and 'WF_Name' (waveform index) to inspect any hit.
 %
 % DEPENDENCIES
-%   AE_listWaveforms.m, AE_plotWaveformByIndex.m, AE_readHits_noPara.m
+%   AE_readDTA.m, AE_listWaveforms.m, AE_plotWaveformByIndex.m
 %
 % Author : Osman Sayginer
 % Affil. : Temple University — Mechatronics Lab
@@ -23,14 +23,15 @@ FileName = 'ExampleDTAfile.DTA';   % path to your .DTA file
 WF_Name  = 1;                      % waveform index to display (1-based)
 
 % ---- List all waveforms (builds the catalog) ----------------------------
-W = AE_listWaveforms(FileName);
+D = AE_readDTA(FileName);          % parse the file once
+W = AE_listWaveforms(D);
 fprintf('Total waveforms found: %d\n', height(W));
 % disp(W);   % uncomment to print full catalog table
 
 % ---- Load and plot the selected waveform --------------------------------
 %   plotMode = 1  → opens a figure
 %   'Scale', 0.5  → apply 0.5× post-ADC voltage multiplier (adjust as needed)
-[t, y, info] = AE_plotWaveformByIndex(FileName, WF_Name, 1, 'Scale', 0.5);
+[t, y, info] = AE_plotWaveformByIndex(D, WF_Name, 1, 'Scale', 0.5);
 
 fprintf('Waveform %d  |  Ch %d  |  %.1f dB AE  |  %d samples\n', ...
         WF_Name, info.channel, info.amplitude_db, info.nsamp);

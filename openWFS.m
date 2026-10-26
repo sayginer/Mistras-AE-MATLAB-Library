@@ -26,6 +26,11 @@ function [data, t, header] = openWFS(fname)
 %                .ChannelNumbers - hardware channel indices
 %                .DataLength     - total samples per channel in data
 %
+%   EMPTY FILES
+%     A recording stopped before any data was written (header only) returns
+%     data = [nChannels x 0], t = [] and header.DataLength = 0, with the
+%     warning 'AE:emptyWFS' instead of an error.
+%
 %   VOLTAGE SCALING
 %     Raw ADC counts (int16, ±32767) are scaled to millivolts using:
 %         mV_per_count = 1000 × MaxVoltage / 32767

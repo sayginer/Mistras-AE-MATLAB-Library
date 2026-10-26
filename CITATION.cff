@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it using the metadata below."
+title: "Mistras AE MATLAB Library"
+type: software
+authors:
+  - family-names: "Sayginer"
+    given-names: "Osman"
+    affiliation: "Temple University"
+doi: "10.5281/zenodo.23519131"
+url: "https://doi.org/10.5281/zenodo.23519131"
+license: MIT

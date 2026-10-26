@@ -35,9 +35,6 @@ function [Number_of_channels, Sample_rate, Pretrigger, Max_voltage, ...
 %   NOTES
 %     • This function is called by openWFS and is not normally invoked directly.
 %     • The voltage scale returned here feeds ReadWFSDataTrunk via openWFS.
-%     • 'findstr' is used for legacy compatibility with older MATLAB versions;
-%       in R2016b+ it is replaced by strfind.
-%
 %   DEPENDENCIES  (none — fully self-contained)
 %
 %   Original authors: Physical Acoustics Corporation
@@ -47,6 +44,8 @@ function [Number_of_channels, Sample_rate, Pretrigger, Max_voltage, ...
 %   Part of the Mistras AEwin DTA/WFS MATLAB Reader Library.
 
 fid = fopen([pathname filename], 'r');
+assert(fid > 0, 'ReadWFSHeader: Cannot open file: %s', [pathname filename]);
+cleanupObj = onCleanup(@() fclose(fid));   % closed even if parsing errors out
 
 % =========================================================================
 % TABLE 1 — Product identification block
@@ -61,9 +60,9 @@ Header.SModel      = fread(fid, Header.Size_table1 - 4, 'char');
 amodel = char(Header.SModel(1:3))';
 
 % Extract software version number (digits around the first '.')
-Header.SVer = str2num(char(Header.SModel( ...
-    findstr(char(Header.SModel'), '.') - 1 : ...
-    findstr(char(Header.SModel'), '.') + 2 ))');  %#ok<ST2NM,FSTR>
+dotPos      = strfind(char(Header.SModel'), '.');
+Header.SVer = str2double(char(Header.SModel( ...
+    dotPos(1) - 1 : dotPos(1) + 2 ))');
 
 fcoef = 1.0;   % voltage gain correction factor (modified below if needed)
 
@@ -199,7 +198,7 @@ end  % end hardware branch
 % =========================================================================
 Header.Size_table6          = fread(fid, 1, 'short');
 Header.Table6_Time_Data_ID  = fread(fid, 1, 'uint8');   % ID 99
-Header.Timestamp            = char(fread(fid, Header.Size_table6 - 1, 'char'));
+Header.Timestamp            = fread(fid, Header.Size_table6 - 1, '*char');
 
 % =========================================================================
 % TABLE 7 — Separator / marker (ID 11, length 0)
@@ -216,7 +215,6 @@ Header.Table8_short = fread(fid, 3, 'short');   % 6 reserved bytes
 
 % ---- Record byte offset where the data trunk begins --------------------
 Header.Length_of_header = ftell(fid);
-fclose(fid);
 
 % =========================================================================
 % Output assignments
@@ -226,6 +224,13 @@ Sample_rate        = Header.sample_rate;           % [kHz], per channel
 Pretrigger         = Header.pretrigger;            % [samples], per channel
 Max_voltage        = Header.maxvoltage * fcoef;    % [V], gain-corrected
 Header_length      = Header.Length_of_header;      % [bytes]
-Timestamp          = char(Header.Timestamp)';
-SVersion           = char(Header.SModel)';
+Timestamp          = clean_text(char(Header.Timestamp)');
+SVersion           = clean_text(char(Header.SModel)');
 ChannelNumbers     = Header.channelList;
+end
+
+% =========================================================================
+function s = clean_text(s)
+% clean_text  Replace control characters (CR/LF/NUL, ...) with spaces and trim.
+    s = strtrim(regexprep(s, '[^\x20-\x7E]+', ' '));
+end

@@ -51,15 +51,17 @@ if filename == 0
 end
 
 fid = fopen([pathname filename], 'r');
+assert(fid > 0, 'ReadWFSDataTrunk: Cannot open file: %s', [pathname filename]);
+cleanupObj = onCleanup(@() fclose(fid));   % closed even if parsing errors out
+fseek(fid, 0, 'eof');  fileBytes = ftell(fid);
 fseek(fid, Header_length, -1);   % jump past the header to the data trunk
 
 % =========================================================================
 % SYNC MESSAGE — channel list, trigger times, FIFO start pointers
 % =========================================================================
-msgLength        = fread(fid, 1, 'short');   % trunk header message length
-mid              = fread(fid, 1, 'uchar');   % message ID  = 174
-sid              = fread(fid, 1, 'uchar');   % sub-ID      = 174
-mver             = fread(fid, 1, 'short');   % message version
+fread(fid, 1, 'short');                      % trunk header message length (unused)
+fread(fid, 2, 'uchar');                      % message ID = 174, sub-ID = 174 (unused)
+fread(fid, 1, 'short');                      % message version (unused)
 numb_of_channels = fread(fid, 1, 'short');  % number of channels in this file
 
 % Per-channel sync data
@@ -78,24 +80,36 @@ end
 
 data_start = ftell(fid);   % remember position for the second pass below
 
+% A recording that was stopped before any data was written ends right after
+% the sync message: return an empty result instead of failing on missing chunks.
+if fileBytes - data_start < 2 + 28
+    warning('AE:emptyWFS', 'ReadWFSDataTrunk: %s contains a header but no waveform data.', filename);
+    data_length = 0;
+    wfsdatas    = zeros(numb_of_channels, 0);
+    return
+end
+
 % =========================================================================
 % FIRST DATA CHUNK — determine nSamples and per-channel FIFO offsets
 % =========================================================================
 msgLength = fread(fid, 1, 'short');
 nSamples  = (msgLength - 28) / 2;   % int16 per sample; 28 bytes of chunk header
 
-waveformIndex(1:32) = 0;   % running sample index per channel (max 32 ch)
-nChunks             = 0;
+waveformIndex(1:max(32, numb_of_channels)) = 0;   % running sample index per channel
+nChunks = 0;
+
+% Upper bound on samples per channel (each sample is 2 bytes of the file), so
+% the buffer is allocated once instead of growing with every chunk.
+datas = zeros(max(32, numb_of_channels), ceil(fileBytes / 2 / numb_of_channels));
 
 % Read FIFO state from the first chunk of each channel
 offset = zeros(1, numb_of_channels);
 for k = 1 : numb_of_channels
-    mid        = fread(fid, 1, 'uchar');   % sub-message ID = 174
-    sid        = fread(fid, 1, 'uchar');   % sub-ID         = 1
-    mver       = fread(fid, 1, 'short');
-    sync       = fread(fid, 1, 'ulong');
-    chanum     = fread(fid, 1, 'ulong');   % channel number (0-based)
-    fifoWriter = fread(fid, 1, 'int64');   % FIFO write pointer
+    fread(fid, 2, 'uchar');                % sub-message ID = 174, sub-ID = 1 (unused)
+    fread(fid, 1, 'short');                % message version (unused)
+    fread(fid, 1, 'ulong');                % sync (unused)
+    fread(fid, 1, 'ulong');                % channel number, 0-based (unused)
+    fread(fid, 1, 'int64');                % FIFO write pointer (unused)
     fifoReadm  = fread(fid, 1, 'ulong');   % FIFO read pointer (high 32 bits)
     fifoReadl  = fread(fid, 1, 'ulong');   % FIFO read pointer (low  32 bits)
     fifoRead   = (fifoReadm * 4294967296.0) + fifoReadl;
@@ -105,7 +119,7 @@ for k = 1 : numb_of_channels
     offset(k)  = double(sampleStart(k)) - (2 * fifoRead);
 
     fread(fid, nSamples, 'short');   % skip sample data (handled in second pass)
-    msgLength = fread(fid, 1, 'short');
+    fread(fid, 1, 'short');          % next message length (unused)
 end
 
 % =========================================================================
@@ -128,7 +142,7 @@ while feof(fid) == 0
         % Append to the running sample buffer for this channel
         idxStart = waveformIndex(chanNum) + 1;
         idxEnd   = waveformIndex(chanNum) + nSamples;
-        datas(chanNum, idxStart:idxEnd) = chunk(1:nSamples);  %#ok<AGROW>
+        datas(chanNum, idxStart:idxEnd) = chunk(1:nSamples);
         waveformIndex(chanNum) = idxEnd;
         nChunks = nChunks + 1;
     end
@@ -137,7 +151,6 @@ while feof(fid) == 0
 end
 
 nChunks = nChunks / numb_of_channels;   % chunks per channel
-fclose(fid);
 
 % =========================================================================
 % FIFO OFFSET CORRECTION — align all channels to the same time origin
@@ -147,11 +160,12 @@ fclose(fid);
 amax = max(offset);
 
 data_length = nChunks * nSamples - amax;
+wfsdatas    = zeros(numb_of_channels, data_length);
 
 for k = 1 : numb_of_channels
     a = offset(k) + 1;
     b = offset(k) + data_length;
-    wfsdatas(k, :) = datas(k, a:b) * voltage_scale(k);  %#ok<AGROW>
+    wfsdatas(k, :) = datas(k, a:b) * voltage_scale(k);
 end
 
 clear datas;   % free raw buffer
