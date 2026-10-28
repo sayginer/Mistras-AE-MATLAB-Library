@@ -1,5 +1,7 @@
 # Mistras AE MATLAB Library
 
+**Version 26.10.27** · [Cite: 10.5281/zenodo.23519131](https://doi.org/10.5281/zenodo.23519131)
+
 A MATLAB library for reading, decoding, and visualizing Acoustic Emission data files produced by **Mistras / Physical Acoustics AEwin** software (`.DTA` and `.WFS` formats).
 
 ---
