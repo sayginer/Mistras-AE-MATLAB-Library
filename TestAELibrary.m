@@ -201,7 +201,8 @@ classdef TestAELibrary < matlab.unittest.TestCase
             tc.verifyEqual(D.hit.amplitude_db.', uint8([77 55]));
             tc.verifyEqual(D.hit.risetime_us.', uint16([321 654]));
             tc.verifyEqual(D.hit.counter.', [1000 2000]);
-            tc.verifyFalse(isfield(D.hit, 'counts'));
+            tc.verifyTrue(all(isnan(D.hit.counts)));        % not recorded -> NaN, never missing
+            tc.verifyEqual(D.setup.hit_fields, {'amplitude_db', 'risetime_us'});
         end
 
         function unknownCharacteristicsStopDecodingSafely(tc)
@@ -209,16 +210,110 @@ classdef TestAELibrary < matlab.unittest.TestCase
             msg5  = [3 6 99 1 0];
             setup = tc.frame(42, [0 200 0, tc.lsub(5, msg5)]);
             hit   = tc.frame(1, [tc.t6(500) 3 88 zeros(1, 9)]);
-            D = AE_readDTA(tc.writeDTA([setup hit]));
+            fn = tc.writeDTA([setup hit]);
+            tc.verifyWarning(@() AE_readDTA(fn), 'AE:unknownCHID');
+            ws = warning('off', 'AE:unknownCHID');
+            D = AE_readDTA(fn);
+            warning(ws);
             tc.verifyEqual(D.hit.amplitude_db, uint8(88));
-            tc.verifyFalse(isfield(D.hit, 'risetime_us'));
+            tc.verifyTrue(isnan(D.hit.risetime_us));
+        end
+
+        function documentationWorkedExample(tc)
+            % The AEwin "AE Features Scaling" notes give a hit message with its
+            % decoded values; messages 5 and 109 are copied from the same notes.
+            msg5   = [8 1 3 4 5 6 21 22 23, 1];                     % CHIDs, then 1 parametric
+            msg109 = hex2dec(strsplit('00 04 00 00 00 00 00 03 00 01 00 04 00 09 00 02 00 0A 00 0D 00 03 00 0E 00 13 00 01 00 01 00 00 00 13 00')).';
+            setup  = tc.frame(42, [0 200 0, tc.lsub(5, msg5), tc.lsub(109, msg109)]);
+            hitHex = '20 00 01 EF 11 28 01 00 00 01 62 00 10 00 1F 00 6C 00 00 00 46 1C 14 40 4C 00 00 01 62 C0 00 01 1F 00';
+            hit    = hex2dec(strsplit(hitHex)).';
+            D = AE_readDTA(tc.writeDTA([setup hit]));
+            tc.verifyEqual(D.setup.n_partial_power, 4);
+            tc.verifyEqual(D.nhits, 1);
+            tc.verifyEqual(D.hit.channel, 1);
+            tc.verifyEqual(D.hit.counter, double(typecast(uint8([239 17 40 1 0 0 0 0]), 'uint64')));
+            tc.verifyEqual(double(D.hit.risetime_us), 98);
+            tc.verifyEqual(double(D.hit.counts), 16);
+            tc.verifyEqual(double(D.hit.energy_u), 31);
+            tc.verifyEqual(double(D.hit.duration_us), 108);
+            tc.verifyEqual(double(D.hit.amplitude_db), 70);
+            tc.verifyEqual(D.hit.abs_energy_aj, 5.035224e7 * 0.000931, 'RelTol', 1e-6);   % 46.878E+03
+            tc.verifyEqual(double(D.hit.partial_power), [0 0 1 98]);
+            tc.verifyEqual(double(D.hit.centroid_freq_khz), 192);
+        end
+
+        function newerInstrumentLayoutWithHighResolutionFeatures(tc)
+            % Layout of a current EasyAE file: no CHID 6; amplitude and ASL come
+            % from the 0.1 dB features 27 and 28, RMS from the 16-bit CHID 17.
+            chid  = [1 2 3 4 5 10 13 17 18 19 20 21 22 23 24 27 28];
+            msg5  = [numel(chid) chid 0];
+            setup = tc.frame(42, [0 200 0, tc.lsub(5, msg5), tc.lsub(109, [0 0 0 0 0])]);
+            u16   = @(v) typecast(uint16(v), 'uint8');
+            u32   = @(v) typecast(uint32(v), 'uint8');
+            hitB  = @(t, ch, amp10) tc.frame(1, [tc.t6(t) ch, ...
+                u16(120) u16(7) u16(33) u16(90) u32(2500) 40, ...     % 1 2 3 4 5 10
+                u16(150), ...                                          % 13 avg freq
+                u16(2500) u16(310) u16(120) u32(1000) ...              % 17 18 19 20
+                typecast(single(2e6), 'uint8') ...                     % 21
+                u16(200) u16(180) ...                                  % 23 24
+                u16(amp10) u16(512)]);                                 % 27 28
+            wf = tc.frame(173, [1 tc.t6(4000) 1 0 typecast(int16(1:8), 'uint8')]);
+            fn = tc.writeDTA([setup wf hitB(4000, 1, 785) hitB(8000, 2, 431)]);
+            D  = AE_readDTA(fn);
+            tc.verifyEqual(D.nhits, 2);
+            tc.verifyEqual(D.hit.amplitude_db.', [78.5 43.1], 'AbsTol', 1e-9);
+            tc.verifyEqual(D.hit.asl_db.', [51.2 51.2], 'AbsTol', 1e-9);
+            tc.verifyEqual(D.hit.rms_v.', [0.5 0.5], 'AbsTol', 1e-9);
+            tc.verifyEqual(D.hit.signal_strength_pvs.', [3050 3050], 'AbsTol', 1e-6);
+            tc.verifyEqual(D.hit.abs_energy_aj.', 2e6 * 0.000931 * [1 1], 'RelTol', 1e-6);
+            tc.verifyEqual(double(D.hit.avg_freq_khz.'), [150 150]);
+            tc.verifyEqual(double(D.hit.rev_freq_khz.'), [310 310]);
+            tc.verifyEqual(double(D.hit.init_freq_khz.'), [120 120]);
+            tc.verifyEqual(double(D.hit.centroid_freq_khz.'), [200 200]);
+            tc.verifyEqual(double(D.hit.peak_freq_khz.'), [180 180]);
+            tc.verifyEqual(double(D.hit.threshold_db.'), [40 40]);
+            tc.verifyEqual(double(D.hit.duration_us.'), [2500 2500]);
+            tc.verifyFalse(isfield(D.hit, 'partial_power'));            % zero segments -> nothing stored
+            % downstream functions work on a file without CHID 6
+            W = AE_listWaveforms(D);
+            tc.verifyEqual(W.amplitude_db, 78.5, 'AbsTol', 1e-9);
+            % first sample = 1 looks like a count of 1 but must stay a sample
+            tc.verifyEqual(W.nsamp, uint32(8));
+            H = AE_plotHits(D, 'Plot', false);
+            tc.verifyEqual(height(H), 2);
+            h = AE_readHits_noPara(fn);
+            tc.verifyEqual(numel(h), 2);
+        end
+
+        function featureOrderDoesNotMatter(tc)
+            % Same two features stored in opposite order in two files
+            a = tc.frame(42, [0 200 0, tc.lsub(5, [2 3 4 0])]);
+            b = tc.frame(42, [0 200 0, tc.lsub(5, [2 4 3 0])]);
+            u16 = @(v) typecast(uint16(v), 'uint8');
+            fa = tc.writeDTA([a tc.frame(1, [tc.t6(1) 1 u16(11) u16(22)])]);   % counts, energy
+            fb = tc.writeDTA([b tc.frame(1, [tc.t6(1) 1 u16(22) u16(11)])]);   % energy, counts
+            Da = AE_readDTA(fa);  Db = AE_readDTA(fb);
+            tc.verifyEqual(Da.hit.counts, Db.hit.counts);
+            tc.verifyEqual(Da.hit.energy_u, Db.hit.energy_u);
+            tc.verifyEqual(double(Da.hit.counts), 11);
+            tc.verifyEqual(double(Da.hit.energy_u), 22);
+        end
+
+        function singleHitFileAndShortHits(tc)
+            fn = tc.writeDTA(tc.frame(1, [tc.t6(77) 2 zeros(1, 11) 3]));     % default layout, one hit
+            D = AE_readDTA(fn);
+            tc.verifyEqual(D.nhits, 1);
+            tc.verifyEqual(D.hit.channel, 2);
+            % hits shorter than the layout needs: warned, none decoded
+            fn2 = tc.writeDTA(tc.frame(1, [tc.t6(1) 1 5 5]));
+            tc.verifyWarning(@() AE_readDTA(fn2), 'AE:hitLayout');
         end
 
         function waveformCountWordAndOtherSubIds(tc)
             s = int16([5 -6 7 8 -9]);
             sb = typecast(s, 'uint8');
-            % waveform with N word, followed by trailing AEF bytes that must be ignored
-            wfN   = tc.frame(173, [1 tc.t6(10) 2 0 typecast(uint16(5), 'uint8') sb 9 9 9 9]);
+            % waveform with an N word that matches the body length exactly
+            wfN   = tc.frame(173, [1 tc.t6(10) 2 0 typecast(uint16(5), 'uint8') sb]);
             % waveform without N word (first two bytes are samples)
             wfRaw = tc.frame(173, [1 tc.t6(20) 3 0 sb]);
             spec  = tc.frame(173, [3 tc.t6(30) 4 0 sb]);        % sub-ID 3 = not a waveform

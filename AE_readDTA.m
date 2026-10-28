@@ -11,6 +11,11 @@
 %   functions in this library build on this parser, so a file is read from
 %   disk and scanned only once.
 %
+%   The set and ORDER of hit features differ between instruments and between
+%   AEwin "Hit Data Set" configurations. Every file lists its own features in
+%   its setup (Msg 5); this reader follows that list, so the order does not
+%   matter and any recorded feature is decoded with its documented scaling.
+%
 %   INPUT
 %     filename : full or relative path to the .DTA file (string)
 %
@@ -26,35 +31,61 @@
 %           .product    - product string (Msg 41), e.g. 'EasyAE ... V1.00'
 %           .test_start - start-of-test date/time string (Msg 99)
 %           .label      - test label / first user comment (Msg 7)
-%           .chid       - AE characteristic IDs stored in every hit (Msg 5)
+%           .chid       - feature IDs stored in every hit, in file order (Msg 5)
+%           .hit_fields - names of the decoded hit fields, in file order
 %           .n_param    - parametric channels declared per hit (Msg 5)
-%       .hit      - struct of column vectors, one entry per hit:
-%           .counter, .time_s, .channel, .risetime_us, .counts, .energy_u,
-%           .duration_us, .amplitude_db, plus any further characteristic
-%           the file defines and this reader knows (counts_to_peak, rms_raw,
-%           asl_db, gain_db, threshold_db, preamp_current, lost_hits,
-%           avg_freq_khz)
+%           .n_partial_power - partial-power segments per hit (Msg 42, sub-ID 109)
+%       .hit      - struct of column vectors, one entry per hit (see below)
 %       .nhits    - number of hits
 %       .wf       - struct with one entry per waveform (column vectors):
 %           .counter, .time_s, .channel, .nsamp (uint32)
 %           .samples  - {Nw x 1} cell of int16 raw ADC counts ([] if skipped)
 %
+%   HIT FIELDS  (CHID = feature ID in the file; scaling from the AEwin
+%   "AE Features Scaling" notes). Only features the file records are present,
+%   except the first five core fields, which are always there (NaN when the
+%   file does not record them).
+%     always   : counter, time_s, channel
+%     CHID  1  : risetime_us        rise time [us]
+%     CHID  2  : counts_to_peak     counts to peak
+%     CHID  3  : counts             threshold-crossing counts
+%     CHID  4  : energy_u           energy [a.u.]
+%     CHID  5  : duration_us        duration [us]
+%     CHID  6  : amplitude_db       amplitude [dB]       (CHID 27: x10 resolution)
+%     CHID  7  : rms_v              RMS [V], 8-bit, = value/20  (obsolete)
+%     CHID  8  : asl_db             average signal level [dB]   (CHID 28: x10)
+%     CHID  9  : gain_db            gain
+%     CHID 10  : threshold_db       threshold [dB]
+%     CHID 11  : preamp_current     preamp current
+%     CHID 12  : lost_hits          lost hits
+%     CHID 13  : avg_freq_khz       average frequency (A-FRQ) [kHz]
+%     CHID 17  : rms_v              RMS [V], 16-bit, = value/5000
+%     CHID 18  : rev_freq_khz       reverberation frequency [kHz]
+%     CHID 19  : init_freq_khz      initiation frequency [kHz]
+%     CHID 20  : signal_strength_pvs signal strength [pVs], = value*3.05
+%     CHID 21  : abs_energy_aj      absolute energy [aJ as shown by AEwin], = value*0.000931
+%     CHID 22  : partial_power      [nhits x segments] partial powers (Msg 109 gives the segments)
+%     CHID 23  : centroid_freq_khz  frequency centroid [kHz]
+%     CHID 24  : peak_freq_khz      peak frequency [kHz]
+%     CHID 27  : amplitude_db       amplitude [dB], 0.1 dB resolution (replaces CHID 6)
+%     CHID 28  : asl_db             ASL [dB], 0.1 dB resolution (replaces CHID 8)
+%
 %   FILE LAYOUT (AEwin64 "Data File Definition", Appendix II)
 %     Frame        : [len (uint16 LE)] [msgId (1)] [body (len-1 bytes)]
-%     Msg 1  (hit) : time(6) ch(1) then the characteristics listed in Msg 5,
-%                    then parametric values
+%     Msg 1  (hit) : time(6) ch(1) then the features listed in Msg 5,
+%                    then parametric values (not decoded here)
 %     Msg 5        : sub-message of Msg 42 (hardware setup) listing the CHIDs
 %     Msg 173,1    : subId(1)=1 time(6) ch(1) pad(1) [N(2)] samples(int16 ...)
-%                    The optional count word N is honoured when present and
-%                    consistent with the body length; otherwise all remaining
-%                    bytes are samples (what AEwin writes in all tested files).
+%                    The optional count word N is honoured only when it matches
+%                    the body length exactly; otherwise all remaining bytes
+%                    are samples (what AEwin writes in all tested files).
 %     A waveform carries the same timestamp and channel as its hit, which is
 %     what AE_listWaveforms uses to pair them.
 %
 %   NOTES
-%     * Characteristics are decoded in file order until the first one whose
-%       size is unknown to this reader (e.g. CHIDs 20-24 in SAMOS files);
-%       everything before it is exact, the rest of the hit body is ignored.
+%     * Features are decoded in file order until the first ID this reader does
+%       not know; a warning (AE:unknownCHID) lists the IDs that were skipped.
+%     * Parametric values (analog inputs recorded with each hit) are not decoded.
 %
 %   Author : Osman Sayginer
 %   Affil. : Temple University — Mechatronics Lab
@@ -69,21 +100,32 @@ wfOpt = p.Results.Waveforms;
 CLOCK_HZ  = 4e6;
 WF_HEADER = 9;    % subId + time6 + ch + pad, before the (optional N and) samples
 
-% Known AE characteristics: CHID -> {field name, bytes, class}
+% Known hit features: CHID -> {field name, bytes, class, scale}
+% bytes = 0 means "one byte per partial-power segment" (CHID 22).
 chidTable = containers.Map('KeyType', 'double', 'ValueType', 'any');
-chidTable(1)  = {'risetime_us',    2, 'uint16'};
-chidTable(2)  = {'counts_to_peak', 2, 'uint16'};
-chidTable(3)  = {'counts',         2, 'uint16'};
-chidTable(4)  = {'energy_u',       2, 'uint16'};
-chidTable(5)  = {'duration_us',    4, 'uint32'};
-chidTable(6)  = {'amplitude_db',   1, 'uint8'};
-chidTable(7)  = {'rms_raw',        1, 'uint8'};
-chidTable(8)  = {'asl_db',         1, 'uint8'};
-chidTable(9)  = {'gain_db',        1, 'uint8'};
-chidTable(10) = {'threshold_db',   1, 'uint8'};
-chidTable(11) = {'preamp_current', 1, 'uint8'};
-chidTable(12) = {'lost_hits',      4, 'uint32'};
-chidTable(13) = {'avg_freq_khz',   2, 'uint16'};
+chidTable(1)  = {'risetime_us',         2, 'uint16', 1};
+chidTable(2)  = {'counts_to_peak',      2, 'uint16', 1};
+chidTable(3)  = {'counts',              2, 'uint16', 1};
+chidTable(4)  = {'energy_u',            2, 'uint16', 1};
+chidTable(5)  = {'duration_us',         4, 'uint32', 1};
+chidTable(6)  = {'amplitude_db',        1, 'uint8',  1};
+chidTable(7)  = {'rms_v',               1, 'uint8',  1/20};
+chidTable(8)  = {'asl_db',              1, 'uint8',  1};
+chidTable(9)  = {'gain_db',             1, 'uint8',  1};
+chidTable(10) = {'threshold_db',        1, 'uint8',  1};
+chidTable(11) = {'preamp_current',      1, 'uint8',  1};
+chidTable(12) = {'lost_hits',           4, 'uint32', 1};
+chidTable(13) = {'avg_freq_khz',        2, 'uint16', 1};
+chidTable(17) = {'rms_v',               2, 'uint16', 1/5000};
+chidTable(18) = {'rev_freq_khz',        2, 'uint16', 1};
+chidTable(19) = {'init_freq_khz',       2, 'uint16', 1};
+chidTable(20) = {'signal_strength_pvs', 4, 'uint32', 3.05};
+chidTable(21) = {'abs_energy_aj',       4, 'single', 0.000931};
+chidTable(22) = {'partial_power',       0, 'uint8',  1};
+chidTable(23) = {'centroid_freq_khz',   2, 'uint16', 1};
+chidTable(24) = {'peak_freq_khz',       2, 'uint16', 1};
+chidTable(27) = {'amplitude_db',        2, 'uint16', 1/10};
+chidTable(28) = {'asl_db',              2, 'uint16', 1/10};
 
 fid = fopen(filename, 'rb');
 assert(fid > 0, 'AE_readDTA: Cannot open file: %s', filename);
@@ -131,26 +173,42 @@ setup.test_start = '';
 setup.label      = '';
 setup.chid       = [1 3 4 5 6];     % default when the file carries no Msg 5
 setup.n_param    = 0;
+nseg = 0;
 if setupPos.p41(1) > 0, setup.product    = ascii_(R(setupPos.p41(1)+3 : setupPos.p41(2))); end
 if setupPos.p99(1) > 0, setup.test_start = ascii_(R(setupPos.p99(1)   : setupPos.p99(2))); end
 if setupPos.p7(1)  > 0, setup.label      = ascii_(R(setupPos.p7(1)    : setupPos.p7(2)));  end
 if setupPos.p42(1) > 0
-    [chid, npid] = parse_msg5_(R(setupPos.p42(1) : setupPos.p42(2)));
+    [chid, npid, nseg] = parse_msg42_(R(setupPos.p42(1) : setupPos.p42(2)));
     if ~isempty(chid), setup.chid = chid;  setup.n_param = npid; end
 end
+setup.n_partial_power = nseg;
 
-% Decode characteristics in file order up to the first unknown CHID
-layout = {};  need = 7;                       % time6 + channel
-for chid_ = setup.chid(:).'
-    if ~isKey(chidTable, chid_), break; end
-    e = chidTable(chid_);
-    layout{end+1} = [e, need];                %#ok<AGROW>  {name, size, class, offset}
-    need = need + e{2};
+% Decode features in file order up to the first unknown CHID
+layout = struct('name', {}, 'bytes', {}, 'cls', {}, 'scale', {}, 'off', {});
+need = 7;                                     % time6 + channel
+for k = 1:numel(setup.chid)
+    cid = setup.chid(k);
+    if ~isKey(chidTable, cid)
+        warning('AE:unknownCHID', ['AE_readDTA: %s: feature ID(s) %s are not known to this reader; ' ...
+            'features from ID %d onward are not decoded.'], filename, ...
+            mat2str(setup.chid(k:end)), cid);
+        break
+    end
+    e = chidTable(cid);
+    nb = e{2};  if nb == 0, nb = nseg; end                 % partial power: 1 byte / segment
+    if nb == 0, continue; end                              % no segments defined: nothing stored
+    layout(end+1) = struct('name', e{1}, 'bytes', nb, 'cls', e{3}, 'scale', e{4}, 'off', need); %#ok<AGROW>
+    need = need + nb;
 end
+setup.hit_fields = unique({layout.name}, 'stable');
 
 % ---- Pass 2: decode hits in bulk ----------------------------------------
 tick = 256 .^ (0:5).';
 okHit  = hitLen >= need;
+if nh > 0 && ~any(okHit)
+    warning('AE:hitLayout', ['AE_readDTA: %s: hits are shorter (%d bytes) than the layout in the ' ...
+        'file setup needs (%d bytes); no hits decoded.'], filename, max(hitLen), need);
+end
 hitPos = hitPos(okHit);
 nh = numel(hitPos);
 
@@ -163,19 +221,26 @@ if nh > 0
     hit.time_s  = ct / CLOCK_HZ;
     hit.channel = double(G(:, 7));
     for k = 1:numel(layout)
-        name = layout{k}{1};  nb = layout{k}{2};  cls = layout{k}{3};  off = layout{k}{4};
-        if nb == 1
-            hit.(name) = G(:, off + 1);
+        e   = layout(k);
+        raw = G(:, e.off + 1 : e.off + e.bytes);
+        if strcmp(e.cls, 'uint8')
+            v = raw;                                  % 1 byte (column) or segments (matrix)
         else
-            hit.(name) = typecast(reshape(G(:, off+1 : off+nb).', [], 1), cls);
+            v = typecast(reshape(raw.', [], 1), e.cls);
         end
+        if e.scale ~= 1, v = double(v) * e.scale; end
+        hit.(e.name) = v;
     end
     clear G
 else
     hit.counter = zeros(0, 1);  hit.time_s = zeros(0, 1);  hit.channel = zeros(0, 1);
     for k = 1:numel(layout)
-        hit.(layout{k}{1}) = zeros(0, 1, layout{k}{3});
+        hit.(layout(k).name) = zeros(0, 1);
     end
+end
+% Core fields downstream code relies on are always present (NaN if not recorded)
+for name = {'risetime_us', 'counts', 'energy_u', 'duration_us', 'amplitude_db'}
+    if ~isfield(hit, name{1}), hit.(name{1}) = nan(nh, 1); end
 end
 
 % ---- Decode waveforms ---------------------------------------------------
@@ -214,35 +279,39 @@ end
 % =========================================================================
 function [s0, ns] = sample_range_(R, p, bodyLen, hdr)
 % Offset of the first sample relative to p (the first body byte, so the first
-% sample is R(p + s0)) and the number of samples. Uses the optional N word
-% when it is consistent with the body length, otherwise every remaining byte
-% pair is a sample.
+% sample is R(p + s0)) and the number of samples. The optional N word is used
+% only when it accounts for the body length exactly; a first sample that merely
+% looks like a small count (e.g. 1) must not be mistaken for it, so anything
+% else is read as a plain stream of samples.
     s0 = hdr;
     ns = floor((bodyLen - hdr) / 2);
     if bodyLen >= hdr + 2
         n = double(R(p+hdr)) + 256 * double(R(p+hdr+1));       % body bytes 10-11
-        if n > 0 && hdr + 2 + 2*n <= bodyLen
+        if n > 0 && hdr + 2 + 2*n == bodyLen
             s0 = hdr + 2;  ns = n;
         end
     end
 end
 
-function [chid, npid] = parse_msg5_(B)
-% Find the Event Data Set Definition (sub-ID 5) inside a Msg-42 body.
+function [chid, npid, nseg] = parse_msg42_(B)
+% Read the hit layout from a Msg-42 body.
 %   Msg 42 body: [idHi (1)] [MVERN (2)] then sub-messages [LSUB (2)] [SUBID (1)] [body]
-%   Msg 5 body : [#CHID] [CHID ...] [#PID]
-    chid = [];  npid = 0;
+%   sub-ID   5 : [#CHID] [CHID ...] [#PID]                 (event data set definition)
+%   sub-ID 109 : [segment type (1)] [#segments (2)] ...    (partial power setup)
+    chid = [];  npid = 0;  nseg = 0;
     q = 4;
     while q + 2 <= numel(B)
         ls = double(B(q)) + 256 * double(B(q+1));
         if ls < 1 || q + 1 + ls > numel(B), break; end
-        if B(q+2) == 5 && ls >= 2
-            n = double(B(q+3));
-            if q + 3 + n <= numel(B) && n > 0
-                chid = double(B(q+4 : q+3+n)).';
-                if q + 4 + n <= q + 1 + ls, npid = double(B(q+4+n)); end
-            end
-            return
+        switch B(q+2)
+            case 5
+                n = double(B(q+3));
+                if ls >= 2 && n > 0 && q + 3 + n <= numel(B)
+                    chid = double(B(q+4 : q+3+n)).';
+                    if q + 4 + n <= q + 1 + ls, npid = double(B(q+4+n)); end
+                end
+            case 109
+                if ls >= 4, nseg = double(B(q+4)) + 256 * double(B(q+5)); end
         end
         q = q + 2 + ls;
     end

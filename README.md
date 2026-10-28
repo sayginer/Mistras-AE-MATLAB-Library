@@ -92,7 +92,7 @@ AE_plotFeatureTrends(T);                                         % RMS, kurtosis
 
 | Function | Description |
 |---|---|
-| `AE_readDTA(file, 'Waveforms', ...)` | Parses the file once; returns setup (`D.setup`), hits as column vectors (`D.hit`) and waveform samples (`D.wf`). The hit layout comes from the file's own event definition. `'Waveforms'` false skips samples; a vector decodes only those indices |
+| `AE_readDTA(file, 'Waveforms', ...)` | Parses the file once; returns setup (`D.setup`), hits as column vectors (`D.hit`) and waveform samples (`D.wf`). The hit features and their order come from the file's own event definition, so files from different instruments (EasyAE, USB AE node, SAMOS, Express) and different "Hit Data Set" settings all work. `'Waveforms'` false skips samples; a vector decodes only those indices |
 | `AE_readHits_noPara(file)` | Returns struct array with amplitude, duration, counts, energy, rise time and `time_s` per hit (slow for millions of hits: prefer `D.hit`) |
 | `AE_listWaveforms(file or D)` | Returns a MATLAB table cataloging every waveform (channel, amplitude, nsamp, t_rel, …); waveforms are paired to hits by timestamp + channel |
 | `AE_plotWaveformByIndex(file or D, idx, plotMode, ...)` | Decodes waveform `idx`, applies ADC→mV conversion, optionally plots. Pass `D` instead of a filename when looping over many waveforms |
@@ -108,25 +108,56 @@ AE_plotFeatureTrends(T);                                         % RMS, kurtosis
 
 ---
 
+## Hit features in `D.hit`
+
+Which features a `.DTA` file holds depends on the instrument and on the AEwin
+*Test Setup → Hardware Setup → Data Sets/Parametrics* configuration. `D.setup.chid` lists
+the feature IDs stored in your file (in file order) and `D.setup.hit_fields` the field names
+that were decoded. Values are converted to physical units using the AEwin
+"AE Features Scaling" notes.
+
+| Field | Feature | ID | Unit / scaling |
+|---|---|---|---|
+| `risetime_us`, `duration_us` | rise time, duration | 1, 5 | µs |
+| `counts`, `counts_to_peak`, `energy_u` | counts, counts to peak, energy | 3, 2, 4 | – |
+| `amplitude_db` | amplitude | 6 or 27 | dB (27 has 0.1 dB resolution) |
+| `asl_db` | average signal level | 8 or 28 | dB (28 has 0.1 dB resolution) |
+| `rms_v` | RMS | 7 or 17 | V (8-bit: value/20, 16-bit: value/5000) |
+| `threshold_db`, `gain_db`, `preamp_current`, `lost_hits` | | 10, 9, 11, 12 | as stored |
+| `avg_freq_khz` | average frequency (A-FRQ) | 13 | kHz |
+| `rev_freq_khz`, `init_freq_khz` | reverberation / initiation frequency | 18, 19 | kHz |
+| `centroid_freq_khz`, `peak_freq_khz` | frequency centroid / peak | 23, 24 | kHz |
+| `signal_strength_pvs` | signal strength | 20 | pVs (value × 3.05) |
+| `abs_energy_aj` | absolute energy (ABS-ENERGY) | 21 | aJ as shown by AEwin (value × 0.000931) |
+| `partial_power` | partial powers, `[hits × segments]` | 22 | as stored |
+
+`counter`, `time_s` and `channel` are always present. The five core fields (`risetime_us`,
+`counts`, `energy_u`, `duration_us`, `amplitude_db`) are always present too, as NaN when the
+file does not record them, so downstream functions keep working.
+
+---
+
 ## Requirements
 
 | | |
 |---|---|
 | **MATLAB** | R2016b or later |
 | **Toolboxes** | None required |
-| **Tests** | `runtests('TestAELibrary')` (23 tests; developed and verified on R2026a) |
+| **Tests** | `runtests('TestAELibrary')` (27 tests; developed and verified on R2026a) |
 | **File formats** | AEwin `.DTA` (Msg-1 hits + Msg-173 waveforms), `.WFS` waveform streaming |
 
 ---
 
 ## Validation and known limits
 
-Checked on 43 real `.DTA` files (about 5.9 million hits, up to 1 GB per file, including the
-AEwin64 `Felicity.DTA` sample with 11 hit characteristics and variable-length waveforms) and
-1,574 real `.wfs` files:
+Checked on 47 real `.DTA` files (about 5.9 million hits, up to 1 GB per file) from four
+instrument types (EasyAE, SAMOS with two firmware versions, Express-8) and 1,574 real `.wfs` files:
 
-- Hit decoding follows the AEwin64 *Data File Definition* (Msg 5 event definition) and is
-  identical to the earlier fixed-layout reader on every lab file.
+- Hit decoding follows the AEwin64 *Data File Definition* (Msg 5 event definition), the AEwin
+  "AE Features Scaling" notes and the partial-power setup (sub-message 109). For every file
+  type tested, the summed feature sizes equal the actual hit length, and A-FRQ equals
+  1000 × counts / duration (median ratio 1.000). Hits are identical to the earlier fixed-layout
+  reader on every lab file.
 - Waveforms are paired to hits by timestamp and channel. Unpaired waveforms (e.g. the last
   frame of a file that was cut short) are kept with `hit_idx = 0` and NaN features.
 - `AE_waveformFeatures` and the spectrum filter agree with the Signal Processing / Statistics
@@ -136,8 +167,9 @@ Known limits:
 
 - The sample rate (`Fs`, default 1 MHz) and the ADC scale (0.000305 V/count) are defaults, not
   read from the file. Pass `'Fs'` if your acquisition used another rate.
-- Hit characteristics are decoded in file order up to the first one this reader does not know the
-  size of (e.g. CHIDs 20-24 in SAMOS files); everything before it is exact.
+- Feature IDs 1-13, 17-24, 27 and 28 are decoded. For any other ID the reader warns
+  (`AE:unknownCHID`) and stops decoding at that feature; everything before it is exact.
+- Parametric values stored with each hit and time-driven data (Msg 2) are not decoded yet.
 - `AE_readDTA` loads the whole file into memory (a 1 GB file needs a few GB of RAM).
 - Only the first test label, product string and event definition of a `.DTA` are read.
 

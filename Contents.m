@@ -1,5 +1,5 @@
 % Mistras AE MATLAB Library
-% Version 26.10.26 (R2016b or later, no toolboxes required)
+% Version 26.10.27 (R2016b or later, no toolboxes required)
 %
 % Read, decode and analyse Acoustic Emission files from Mistras / Physical
 % Acoustics AEwin software (.DTA hit and waveform files, .WFS streaming files).

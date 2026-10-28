@@ -21,7 +21,9 @@ function hits = AE_readHits_noPara(filename)
 %       .duration_us  - hit duration in microseconds (uint32)
 %       .amplitude_db - peak amplitude in dB AE (uint8)
 %       .time_s       - hit time in seconds since the counter started (double)
-%       plus any further characteristic present in the file (see AE_readDTA)
+%       plus every further feature the file records, with physical units
+%       (rms_v, asl_db, avg_freq_khz, abs_energy_aj, ... see AE_readDTA).
+%       The five core fields are NaN when the file does not record them.
 %
 %   NOTES
 %     * The 6-byte timestamp is a 48-bit little-endian counter ticked at 4 MHz
@@ -58,7 +60,9 @@ fields = fieldnames(H);
 fields = fields(~ismember(fields, {'counter', 'time6'}));
 args   = {'time6', num2cell(time6, 2)};
 for k = 1:numel(fields)
-    args = [args, {fields{k}, num2cell(H.(fields{k}))}];   %#ok<AGROW>
+    v = H.(fields{k});
+    if size(v, 2) > 1, c = num2cell(v, 2); else, c = num2cell(v); end   % matrix fields: one row per hit
+    args = [args, {fields{k}, c}];   %#ok<AGROW>
 end
 hits = struct(args{:}).';
 end

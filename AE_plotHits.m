@@ -114,12 +114,17 @@ cumulative_panel(time, channel, energy_u, chans, colors);
 xlabel(tlab); ylabel('Cumulative energy (a.u.)'); title('Cumulative energy');
 
 subplot(2, 2, 4); hold on;
-edges = (floor(min(amplitude_db)) : 2 : ceil(max(amplitude_db)) + 2);
-for i = 1:numel(chans)
-    histogram(amplitude_db(channel == chans(i)), edges, ...
-        'FaceColor', colors(i,:), 'FaceAlpha', 0.6);
+if all(isnan(amplitude_db))
+    text(0.5, 0.5, 'Amplitude not recorded in this file', 'HorizontalAlignment', 'center');
+    axis off;
+else
+    edges = (floor(min(amplitude_db)) : 2 : ceil(max(amplitude_db)) + 2);
+    for i = 1:numel(chans)
+        histogram(amplitude_db(channel == chans(i)), edges, ...
+            'FaceColor', colors(i,:), 'FaceAlpha', 0.6);
+    end
+    grid on; xlabel('Amplitude (dB AE)'); ylabel('Hits'); title('Amplitude distribution');
 end
-grid on; xlabel('Amplitude (dB AE)'); ylabel('Hits'); title('Amplitude distribution');
 end
 
 % =========================================================================
